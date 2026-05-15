@@ -239,9 +239,8 @@ def static_prune_skills(current_node: MCTSNode,
     # Context-based filtering (matching spec rules)
     has_code_changes = vfs_state.get("has_code_changes", False)
 
-    # Don't run_tests if no code was edited yet
-    if not has_code_changes:
-        candidates = [c for c in candidates if c.skill_id != "run_tests"]
+    # Allow run_tests even without code changes - we need to verify current state
+    # The MCTS will learn that run_tests gives best score (1.0) when fix is correct
 
     return candidates
 

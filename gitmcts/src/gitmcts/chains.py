@@ -791,13 +791,189 @@ def mcts_search(goal: str, repo_path: str, config: dict = None, display=None) ->
     print(f"\n[*] GitMCTS starting | goal: {goal[:50]}... | budget: {budget}\n")
 
     # Main loop (replacing Chain 9 Meta-Controller)
-    with Live(display.render(), refresh_per_second=4) as live:
-        while simulations < budget and not is_terminal:
-            # Update display
-            if display:
+    if display:
+        with Live(display.render(), refresh_per_second=4) as live:
+            while simulations < budget and not is_terminal:
+                # Update display
                 live.update(display.render())
 
+                # Chain 1: Static Prune
+                candidates = chain1_static_prune(current_node, vfs_state)
+
+                if not candidates:
+                    current_node.is_pruned = True
+                    current_node.pruned_reason = "no_valid_skills"
+                    display.set_pruned(f"sim-{simulations}|pruned", "no_valid_skills")
+                    if current_node.parent_id:
+                        current_node = tree.get_node(current_node.parent_id)
+                    continue
+
+                # Chain 2: UCT Select (if we have children)
+                if current_node.children:
+                    selected = uct_select(current_node, tree)
+                    if selected and selected.node_id != current_node.node_id:
+                        current_node = selected
+
+                # Chain 3: Skill Expansion - pass expansion for plan update
+                expansion = chain3_skill_expansion(current_node, candidates, goal, vfs_state, plan_md, tree, current_node.context_buffer)
+                skill_id = expansion.get("skill_id", "run_tests")
+                skill_params = expansion.get("params", {})
+                # Use plan_md_update from expansion if available (FIX 2)
+                if expansion.get("plan_md_update"):
+                    plan_md = expansion["plan_md_update"]
+
+                skill = skill_registry.get(skill_id)
+                if not skill:
+                    skill = SkillEntry(skill_id=skill_id, name=skill_id, description="", reversibility="R")
+
+                # Chain 4: Execution - pass expansion for plan DNA (FIX 2)
+                try:
+                    new_node_id, worktree, plan_md, result = chain4_execute(
+                        vfs, current_node.node_id, skill, skill_params, goal, plan_md, expansion
+                    )
+                except Exception as e:
+                    display.set_pruned(f"sim-{simulations}|{skill_id}", f"error: {e}")
+                    simulations += 1
+                    live.update(display.render())
+                    continue
+
+                # Chain 5: Fast Eval + Oracle
+                score = chain5_fast_eval(skill_id, result)
+
+                new_context = current_node.context_buffer.copy()
+                if skill_id == "read_file":
+                    new_context["last_read_content"] = result.get("content", "")[:2000]
+                    new_context["last_read_file"] = result.get("file_path", "")
+
+                class _R:
+                    passed = result.get("passed", 0)
+                    failed = result.get("failed", 0)
+                    errors = 0
+                    def __init__(self):
+                        self.score = score
+                r_obj = _R()
+                display.set_scored(f"sim-{simulations}|{skill_id}", r_obj)
+
+                # Update VFS state
+                vfs_state["has_code_changes"] = vfs_state["has_code_changes"] or (skill_id == "edit_file")
+
+                # Create new node
+                new_node = MCTSNode(
+                    node_id=new_node_id,
+                    parent_id=current_node.node_id,
+                    depth=current_node.depth + 1,
+                    goal_slice=goal,
+                    goal_hash=root_node.goal_hash,
+                    Q={"quality": score, "cost": 1.0, "latency": 1.0, "safety": 1.0},
+                    N=0,
+                    skill_used=skill_id,
+                    skill_params=skill_params,
+                    reversibility=skill.reversibility,
+                    context_buffer=new_context
+                )
+
+                from .vfs import Branch
+                from pathlib import Path
+                ui_branch = Branch(
+                    name=f"sim-{simulations}|{skill_id}",
+                    node_id=new_node_id,
+                    worktree=worktree
+                )
+                display.add_branch(ui_branch)
+                display.set_exploring(ui_branch.name)
+
+                tree.add_node(new_node)
+                simulations += 1
+
+                # Update display after evaluation
+                display.set_scored(f"sim-{simulations-1}|{skill_id}", r_obj)
+                live.update(display.render())
+
+                # Chain 7: Backpropagation
+                chain7_backpropagate(new_node_id, tree)
+
+                # Chain 8: Terminal Check (pure Python - kill LLM)
+                if chain8_terminal_check(tree, new_node_id):
+                    is_terminal = True
+                    display.set_winner(f"sim-{simulations-1}|{skill_id}")
+
+                current_node = new_node
+    else:
+        while simulations < budget and not is_terminal:
             # Chain 1: Static Prune
+            candidates = chain1_static_prune(current_node, vfs_state)
+
+            if not candidates:
+                current_node.is_pruned = True
+                current_node.pruned_reason = "no_valid_skills"
+                if current_node.parent_id:
+                    current_node = tree.get_node(current_node.parent_id)
+                continue
+
+            # Chain 2: UCT Select (if we have children)
+            if current_node.children:
+                selected = uct_select(current_node, tree)
+                if selected and selected.node_id != current_node.node_id:
+                    current_node = selected
+
+            # Chain 3: Skill Expansion - pass expansion for plan update
+            expansion = chain3_skill_expansion(current_node, candidates, goal, vfs_state, plan_md, tree, current_node.context_buffer)
+            skill_id = expansion.get("skill_id", "run_tests")
+            skill_params = expansion.get("params", {})
+            # Use plan_md_update from expansion if available (FIX 2)
+            if expansion.get("plan_md_update"):
+                plan_md = expansion["plan_md_update"]
+
+            skill = skill_registry.get(skill_id)
+            if not skill:
+                skill = SkillEntry(skill_id=skill_id, name=skill_id, description="", reversibility="R")
+
+            # Chain 4: Execution - pass expansion for plan DNA (FIX 2)
+            try:
+                new_node_id, worktree, plan_md, result = chain4_execute(
+                    vfs, current_node.node_id, skill, skill_params, goal, plan_md, expansion
+                )
+            except Exception as e:
+                simulations += 1
+                continue
+
+            # Chain 5: Fast Eval + Oracle
+            score = chain5_fast_eval(skill_id, result)
+
+            new_context = current_node.context_buffer.copy()
+            if skill_id == "read_file":
+                new_context["last_read_content"] = result.get("content", "")[:2000]
+                new_context["last_read_file"] = result.get("file_path", "")
+
+            # Update VFS state
+            vfs_state["has_code_changes"] = vfs_state["has_code_changes"] or (skill_id == "edit_file")
+
+            # Create new node
+            new_node = MCTSNode(
+                node_id=new_node_id,
+                parent_id=current_node.node_id,
+                depth=current_node.depth + 1,
+                goal_slice=goal,
+                goal_hash=root_node.goal_hash,
+                Q={"quality": score, "cost": 1.0, "latency": 1.0, "safety": 1.0},
+                N=0,
+                skill_used=skill_id,
+                skill_params=skill_params,
+                reversibility=skill.reversibility,
+                context_buffer=new_context
+            )
+
+            tree.add_node(new_node)
+            simulations += 1
+
+            # Chain 7: Backpropagation
+            chain7_backpropagate(new_node_id, tree)
+
+            # Chain 8: Terminal Check (pure Python - kill LLM)
+            if chain8_terminal_check(tree, new_node_id):
+                is_terminal = True
+
+            current_node = new_node
             candidates = chain1_static_prune(current_node, vfs_state)
 
             if not candidates:
