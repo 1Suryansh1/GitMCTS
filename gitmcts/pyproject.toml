@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gitmcts"
+version = "0.1.0"
+description = "MCTS code agent using Git's Merkle DAG as world-state substrate"
+requires-python = ">=3.11"
+dependencies = [
+    "google-genai>=0.1.0",
+    "gitpython>=3.1",
+    "rich>=13.0",
+    "click>=8.0",
+    "pytest>=7.0",
+    "pytest-json-report>=1.5"
+]
+
+[project.scripts]
+gitmcts = "gitmcts.cli:fix"
